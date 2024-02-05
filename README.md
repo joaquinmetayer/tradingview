@@ -1,6 +1,6 @@
 # TradingView Indicators
 
-## AIO Blue
+### <a href="https://github.com/joaquinmetayer/tradingview/blob/main/aioblue.pine" target="_blank">AIO Blue</a>
 
 This indicator is a combination of two diferents indicators: LuxAlgo Sessions, TextLabels and PriceAlerts.
 
