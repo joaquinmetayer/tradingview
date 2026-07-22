@@ -1,0 +1,84 @@
+//@version=5
+indicator("Range Risk Lines v3", "RRL v3", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// Inputs
+range_points = input.float(100.0, "Range in points", minval=1.0, step=1.0, tooltip="Spacing between grid lines, in points. Range in price = points × point size")
+point_size_in = input.float(0.0, "Point size (0 = auto)", minval=0.0, step=0.001, tooltip="Price value of 1 point. 0 = automatic: uses this chart's tick size, which is exactly what the TradingView ruler counts, so measuring one grid step with the ruler gives the number of points you set. Set a manual value only if your broker's point differs from the chart tick")
+risk_amount = input.float(100.0, "Risk amount", minval=0.01, step=1.0, tooltip="Risk amount in your account currency")
+lot_units = input.float(100.0, "Contract size (units per 1.0 lot)", minval=0.000001, tooltip="How many units of the symbol make 1.0 lot at your broker. Gold (XAUUSD): 100. Forex: 100000. Silver: 5000. Most index/crypto CFDs: 1")
+grid_levels = input.int(5, "Grid levels each side", minval=1, maxval=20, tooltip="How many lines to draw above and below the last price")
+show_middle_line = input.bool(true, "Show middle line")
+line_color = input.color(color.new(color.orange, 0), "Line color")
+line_style = input.string("Dotted", "Line style", options=["Solid", "Dotted", "Dashed"])
+line_width = input.int(2, "Line width", minval=1, maxval=5)
+line_transparency = input.int(0, "Line transparency", minval=0, maxval=100, tooltip="0 = fully visible, 100 = invisible")
+show_labels = input.bool(true, "Show labels")
+label_size = input.string("Small", "Label size", options=["Tiny", "Small", "Normal"])
+show_info = input.bool(true, "Show info panel", tooltip="Panel with the symbol data the script sees: tick size, point value, computed range and lot")
+
+// Derived values
+// The TradingView ruler counts pips on forex and metals: on fractional-pip feeds
+// (3 or 5 decimals) one ruler unit = 10 chart ticks. Auto mode reproduces that,
+// so measuring one grid step with the ruler reads exactly range_points
+price_decimals = int(math.round(math.log10(syminfo.pricescale)))
+tkr = str.upper(syminfo.ticker)
+is_pip_symbol = syminfo.type == "forex" or str.contains(tkr, "XAU") or str.contains(tkr, "XAG") or str.contains(tkr, "XPT") or str.contains(tkr, "XPD")
+ruler_point = is_pip_symbol and price_decimals % 2 == 1 ? syminfo.mintick * 10 : syminfo.mintick
+point_size = point_size_in > 0 ? point_size_in : ruler_point
+range_price = range_points * point_size
+range_text = str.tostring(range_points) + " pts (" + str.tostring(range_price, format.mintick) + ")"
+
+// syminfo.pointvalue = currency value of a 1.0 price move per unit/contract of this symbol
+// Lot needed to lose risk_amount if price travels the given distance
+lot_for(dist_price) =>
+    risk_amount / (dist_price * syminfo.pointvalue) / lot_units
+
+style_value = line_style == "Solid" ? line.style_solid : line_style == "Dashed" ? line.style_dashed : line.style_dotted
+size_value = label_size == "Tiny" ? size.tiny : label_size == "Normal" ? size.normal : size.small
+
+// Grid objects, cleared and redrawn on every tick of the last bar
+var line[] grid_lines = array.new_line()
+var label[] grid_labels = array.new_label()
+
+new_grid_line(price_level) =>
+    array.push(grid_lines, line.new(bar_index, price_level, bar_index + 1, price_level, extend=extend.right, color=color.new(line_color, line_transparency), style=style_value, width=line_width))
+
+new_grid_label(price_level, txt) =>
+    array.push(grid_labels, label.new(bar_index, price_level, txt, xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.black, 100), textcolor=chart.fg_color, style=label.style_label_left, size=size_value))
+
+// Grid centered on the last price, following it in realtime
+if barstate.islast
+    while array.size(grid_lines) > 0
+        line.delete(array.pop(grid_lines))
+    while array.size(grid_labels) > 0
+        label.delete(array.pop(grid_labels))
+
+    if show_middle_line
+        new_grid_line(close)
+        if show_labels
+            new_grid_label(close, "Last " + str.tostring(close, format.mintick))
+
+    for i = 1 to grid_levels
+        upper_level = close + i * range_price
+        lower_level = close - i * range_price
+        level_pts = str.tostring(i * range_points)
+        level_lot = "Lot " + str.tostring(lot_for(i * range_price), "0.00")
+        new_grid_line(upper_level)
+        new_grid_line(lower_level)
+        if show_labels
+            new_grid_label(upper_level, level_lot + " | +" + level_pts + " pts")
+            new_grid_label(lower_level, level_lot + " | -" + level_pts + " pts")
+
+// Info panel: shows exactly what the script sees on this symbol
+var table info = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 60))
+if barstate.islast and show_info
+    table.cell(info, 0, 0, "Tick size (chart)", text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(info, 1, 0, str.tostring(syminfo.mintick), text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(info, 0, 1, "Point size (used)", text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(info, 1, 1, str.tostring(point_size), text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(info, 0, 2, "Point value", text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(info, 1, 2, str.tostring(syminfo.pointvalue), text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(info, 0, 3, "Grid step", text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(info, 1, 3, range_text, text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(info, 0, 4, "Lot @ 1 step", text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(info, 1, 4, str.tostring(lot_for(range_price), "0.00"), text_color=chart.fg_color, text_size=size.tiny, text_halign=text.align_right)
