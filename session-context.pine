@@ -1,0 +1,307 @@
+//@version=6
+indicator("Session Context", "CONTEXT", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+gTF    = "HTF candles"
+htfOn  = input.bool(true, "Enable", group = gTF)
+tfMode = input.string("Auto", "Timeframe", options = ["Auto", "Custom"], group = gTF, tooltip = "Auto = 1H while the chart is below 1H (seconds / minutes).")
+tfUser = input.timeframe("60", "Custom", group = gTF)
+qty    = input.int(20, "Candles to draw", minval = 1, maxval = 100, group = gTF)
+winOn  = input.bool(true, "Only inside a window", group = gTF, tooltip = "Keeps the overnight hours clean. The default runs from the close of the London range (04:00) to the market close (16:00) New York time.\n\nAn HTF candle is drawn when it OPENS inside the window, so pick a window that lines up with the HTF period.")
+winSes = input.session("0400-1600", "Window", group = gTF)
+winTz  = input.string("America/New_York", "Timezone", group = gTF)
+
+gSTY    = "HTF candles · style"
+transp  = input.int(80, "Transparency %", minval = 0, maxval = 100, group = gSTY)
+bullCol = input.color(#ffffff, "Bull", inline = "cols", group = gSTY)
+bearCol = input.color(#f23645, "Bear", inline = "cols", group = gSTY)
+showBrd = input.bool(true, "Border", inline = "brd", group = gSTY)
+brdW    = input.int(1, "Width", minval = 1, maxval = 4, inline = "brd", group = gSTY)
+wickW   = input.int(2, "Wick width", minval = 1, maxval = 4, group = gSTY)
+crisp   = input.bool(true, "Borders & wicks more opaque than the body", group = gSTY)
+
+gPOS    = "HTF candles · position"
+mode    = input.string("Overlay", "Mode", options = ["Overlay", "Project right"], group = gPOS, tooltip = "Overlay = drawn over the minute candles it is made of.\nProject right = drawn as a separate mini-chart to the right of the last bar.")
+runFull = input.bool(true, "Running candle spans its whole period", group = gPOS, tooltip = "The candle in progress is drawn full width, up to where the period will close, instead of stopping at the current bar.")
+gapB    = input.int(10, "Gap from last bar", minval = 1, maxval = 100, group = gPOS)
+cW      = input.int(5, "Candle width (bars)", minval = 1, maxval = 30, group = gPOS)
+spc     = input.int(2, "Spacing (bars)", minval = 1, maxval = 20, group = gPOS)
+
+gTMR    = "HTF candles · countdown"
+showTmr = input.bool(true, "Time left to close, centred in the body", group = gTMR)
+tmrFmt  = input.string("MM:SS", "Format", options = ["MM:SS", "HH:MM:SS", "Compact"], group = gTMR, tooltip = "Compact = 1h 05m 30s")
+tmrAuto = input.bool(true, "Use the candle colour for the text", group = gTMR)
+tmrCol  = input.color(color.white, "Custom text colour", group = gTMR)
+tmrSize = input.string("normal", "Text size", options = ["tiny", "small", "normal", "large", "huge"], group = gTMR)
+
+autoHtf = switch
+    timeframe.isseconds => "60"
+    timeframe.isminutes => timeframe.multiplier < 60 ? "60" : "D"
+    timeframe.isdaily   => "W"
+    timeframe.isweekly  => "M"
+    => "12M"
+
+htf    = tfMode == "Custom" ? tfUser : autoHtf
+htfSec = timeframe.in_seconds(htf)
+ltfSec = timeframe.in_seconds(timeframe.period)
+valid  = htfOn and htfSec > ltfSec
+
+step  = cW + spc
+fit   = math.max(1, int((480 - gapB - cW) / step) + 1)
+barMs = ltfSec * 1000
+
+htfClose = request.security(syminfo.tickerid, htf, time_close, lookahead = barmerge.lookahead_on)
+
+txtSize = switch tmrSize
+    "tiny"  => size.tiny
+    "small" => size.small
+    "large" => size.large
+    "huge"  => size.huge
+    => size.normal
+
+padZ(int v) =>
+    (v < 10 ? "0" : "") + str.tostring(v)
+
+fmtLeft(int ms) =>
+    int t  = math.max(0, int(ms / 1000))
+    int hh = int(t / 3600)
+    int mm = int((t % 3600) / 60)
+    int ss = t % 60
+    switch tmrFmt
+        "HH:MM:SS" => padZ(hh) + ":" + padZ(mm) + ":" + padZ(ss)
+        "Compact"  => (hh > 0 ? str.tostring(hh) + "h " : "") + padZ(mm) + "m " + padZ(ss) + "s"
+        => (hh > 0 ? str.tostring(hh) + ":" : "") + padZ(mm) + ":" + padZ(ss)
+
+type HtfBar
+    float o
+    float h
+    float l
+    float c
+    int   sTime
+    int   eTime
+
+var array<HtfBar> cs = array.new<HtfBar>()
+
+winIn = not winOn or not na(time(timeframe.period, winSes, winTz))
+var bool track = false
+
+if valid
+    if cs.size() == 0 or timeframe.change(htf)
+        track := winIn
+        if track
+            cs.push(HtfBar.new(open, high, low, close, time, time))
+            if cs.size() > qty
+                cs.shift()
+    else if track and cs.size() > 0
+        cur = cs.last()
+        cur.h     := math.max(cur.h, high)
+        cur.l     := math.min(cur.l, low)
+        cur.c     := close
+        cur.eTime := time
+
+var array<box>  bxs  = array.new<box>()
+var array<line> lns  = array.new<line>()
+var label       warn = na
+var label       tmr  = na
+
+if barstate.islast and htfOn
+    for b in bxs
+        b.delete()
+    bxs.clear()
+    for l in lns
+        l.delete()
+    lns.clear()
+    label.delete(warn)
+    label.delete(tmr)
+
+    if not valid
+        warn := label.new(bar_index, high, "Session Context: pick a timeframe higher than the chart (" + timeframe.period + ")", style = label.style_label_down, color = color.new(color.red, 20), textcolor = color.white, size = size.small)
+    else
+        bool byTime = mode == "Overlay"
+        string xl   = byTime ? xloc.bar_time : xloc.bar_index
+        int n       = cs.size()
+        int first   = byTime ? 0 : math.max(0, n - fit)
+
+        for i = first to n - 1
+            HtfBar cd = cs.get(i)
+
+            bool  up   = cd.c >= cd.o
+            color base = up ? bullCol : bearCol
+            color fill = color.new(base, transp)
+            color edge = color.new(base, crisp ? int(transp / 2) : transp)
+
+            int left  = 0
+            int right = 0
+            if byTime
+                left  := cd.sTime
+                right := cd.eTime
+                if runFull and track and i == n - 1 and not na(htfClose)
+                    right := int(math.max(cd.eTime, htfClose - barMs))
+            else
+                left  := last_bar_index + gapB + (i - first) * step
+                right := left + cW
+
+            int   mid    = int(math.avg(left, right))
+            float bodyHi = math.max(cd.o, cd.c)
+            float bodyLo = math.min(cd.o, cd.c)
+
+            lns.push(line.new(mid, cd.h, mid, bodyHi, xloc = xl, color = edge, width = wickW))
+            lns.push(line.new(mid, bodyLo, mid, cd.l, xloc = xl, color = edge, width = wickW))
+            bxs.push(box.new(left, bodyHi, right, bodyLo, xloc = xl, border_color = showBrd ? edge : color.new(base, 100), border_width = showBrd ? brdW : 0, bgcolor = fill))
+
+            if showTmr and track and i == n - 1 and not na(htfClose)
+                tmr := label.new(mid, math.avg(bodyHi, bodyLo), fmtLeft(int(htfClose - timenow)), xloc = xl, style = label.style_label_center, color = color.new(color.black, 100), textcolor = tmrAuto ? color.new(base, 0) : tmrCol, size = txtSize, textalign = text.align_center)
+
+gDR    = "DR / IDR"
+drOn   = input.bool(true, "Enable", group = gDR)
+drTz   = input.string("America/New_York", "Timezone", group = gDR, tooltip = "The model is defined in New York time.")
+drDays = input.int(3, "Days kept on the chart", minval = 1, maxval = 20, group = gDR)
+confLv = input.string("IDR", "Confirmation level", options = ["IDR", "DR"], group = gDR, tooltip = "The first close beyond this level, once the defining hour is over, confirms the session bias. The classic reading is a 5m close beyond the IDR.")
+idrTf  = input.timeframe("5", "IDR basis", group = gDR, tooltip = "The DR is the highest high and lowest low of the hour, which is the same number on every chart timeframe. The IDR is the highest and lowest BODY, and bodies change with candle size: the same hour gives a different IDR on 1m than on 5m.\n\nThe model is defined on 5m, so bodies are only folded in when a candle of THIS timeframe closes — the IDR then stays put whatever chart timeframe you look at. Keep the chart at or below this timeframe.")
+lnFrom = input.string("Defining hour", "Levels start at", options = ["Defining hour", "End of the hour"], group = gDR, tooltip = "Where the horizontal levels begin. Most DR indicators start them once the hour is over (09:30-10:30 defines, lines run 10:30-16:00); starting them at the open of the hour shows where they came from.")
+
+gSES = "DR / IDR · sessions"
+rOn   = input.bool(false, "RDR  New York", inline = "r", group = gSES)
+rDef  = input.session("0930-1030", "", inline = "r", group = gSES)
+rLen  = input.int(390, "min", inline = "r", group = gSES, tooltip = "Minutes the session runs from the start of its defining hour. 390 = 6h30 (09:30 to 16:00), 330 = 5h30 (03:00 to 08:30).")
+rCol  = input.color(#ffffff, "", inline = "r", group = gSES)
+oOn   = input.bool(true,  "ODR  London  ", inline = "o", group = gSES)
+oDef  = input.session("0300-0400", "", inline = "o", group = gSES)
+oLen  = input.int(330, "min", inline = "o", group = gSES)
+oCol  = input.color(#b2b5be, "", inline = "o", group = gSES)
+aOn   = input.bool(false, "ADR  Asia    ", inline = "a", group = gSES)
+aDef  = input.session("1930-2030", "", inline = "a", group = gSES)
+aLen  = input.int(390, "min", inline = "a", group = gSES)
+aCol  = input.color(#787b86, "", inline = "a", group = gSES)
+
+gDRS   = "DR / IDR · style"
+shDR   = input.bool(true, "DR high / low (dashed)", group = gDRS)
+shIDR  = input.bool(true, "IDR high / low (solid)", group = gDRS)
+shMidD = input.bool(false, "DR midpoint (dotted)", group = gDRS, tooltip = "Halfway between the DR high and the DR low, so it is measured on the wicks.")
+shMidI = input.bool(true, "IDR midpoint (dotted)", group = gDRS, tooltip = "Halfway between the IDR high and the IDR low, so it is measured on the bodies. This is the equilibrium most DR indicators draw — they ship with the DR midpoint off and this one on.")
+shBox  = input.bool(true, "Shade the defining hour", inline = "bx", group = gDRS, tooltip = "The shading covers only the hour the range is taken from. The levels themselves run on to the end of the session.")
+boxTr  = input.int(85, "transp", minval = 50, maxval = 100, inline = "bx", group = gDRS)
+drW    = input.int(1, "Line width", minval = 1, maxval = 4, group = gDRS)
+
+rIn = drOn and rOn and not na(time(timeframe.period, rDef, drTz))
+oIn = drOn and oOn and not na(time(timeframe.period, oDef, drTz))
+aIn = drOn and aOn and not na(time(timeframe.period, aDef, drTz))
+
+var float bOpen = na
+float bodyHi = na
+float bodyLo = na
+if timeframe.change(idrTf)
+    if not na(bOpen)
+        bodyHi := math.max(bOpen, close[1])
+        bodyLo := math.min(bOpen, close[1])
+    bOpen := open
+
+drSession(bool on, bool inDef, bool dStart, bool dEnd, color col, int sessMin, float bHi, float bLo) =>
+    var float dh   = na
+    var float dl   = na
+    var float ih   = na
+    var float il   = na
+    var int   t0   = na
+    var int   t1   = na
+    var int   conf = 0
+    var int   perL = 0
+    var int   perB = 0
+    var array<line> lnA = array.new<line>()
+    var array<box>  bxA = array.new<box>()
+
+    if on
+        if dStart
+            dh   := high
+            dl   := low
+            ih   := na
+            il   := na
+            t0   := time
+            t1   := time + barMs
+            conf := 0
+        else if inDef and not na(t0)
+            dh := math.max(dh, high)
+            dl := math.min(dl, low)
+            t1 := time + barMs
+
+        if (inDef or dEnd) and not dStart and not na(bHi)
+            ih := na(ih) ? bHi : math.max(ih, bHi)
+            il := na(il) ? bLo : math.min(il, bLo)
+
+        if dEnd and not na(dh)
+            bool  hasI = not na(ih)
+            int   xL   = lnFrom == "End of the hour" ? t1 : t0
+            int   x2   = t0 + sessMin * 60000
+            float midD = math.avg(dh, dl)
+            float midI = hasI ? math.avg(ih, il) : na
+            int   nL   = 0
+            int   nB   = 0
+
+            if shBox
+                bxA.push(box.new(t0, dh, t1, dl, xloc = xloc.bar_time, border_color = color.new(col, 100), bgcolor = color.new(col, boxTr)))
+                nB += 1
+            if shDR
+                lnA.push(line.new(xL, dh, x2, dh, xloc = xloc.bar_time, color = col, width = drW, style = line.style_dashed))
+                lnA.push(line.new(xL, dl, x2, dl, xloc = xloc.bar_time, color = col, width = drW, style = line.style_dashed))
+                nL += 2
+            if shIDR and hasI
+                lnA.push(line.new(xL, ih, x2, ih, xloc = xloc.bar_time, color = col, width = drW, style = line.style_solid))
+                lnA.push(line.new(xL, il, x2, il, xloc = xloc.bar_time, color = col, width = drW, style = line.style_solid))
+                nL += 2
+            if shMidD
+                lnA.push(line.new(xL, midD, x2, midD, xloc = xloc.bar_time, color = color.new(col, 55), width = 1, style = line.style_dotted))
+                nL += 1
+            if shMidI and hasI
+                lnA.push(line.new(xL, midI, x2, midI, xloc = xloc.bar_time, color = color.new(col, 35), width = 1, style = line.style_dotted))
+                nL += 1
+            perL := nL
+            perB := nB
+
+            while lnA.size() > drDays * perL
+                line.delete(lnA.shift())
+            while bxA.size() > drDays * perB
+                box.delete(bxA.shift())
+
+        bool live = not na(t0) and not inDef and time < t0 + sessMin * 60000
+        if live and conf == 0 and not na(ih)
+            float up = confLv == "IDR" ? ih : dh
+            float dn = confLv == "IDR" ? il : dl
+            conf := close > up ? 1 : close < dn ? -1 : 0
+    conf
+
+rConf = drSession(rOn and drOn, rIn, rIn and not rIn[1], not rIn and rIn[1], rCol, rLen, bodyHi, bodyLo)
+oConf = drSession(oOn and drOn, oIn, oIn and not oIn[1], not oIn and oIn[1], oCol, oLen, bodyHi, bodyLo)
+aConf = drSession(aOn and drOn, aIn, aIn and not aIn[1], not aIn and aIn[1], aCol, aLen, bodyHi, bodyLo)
+
+alertcondition(ta.change(rConf) != 0 and rConf != 0, "RDR confirmed", "RDR confirmation: price closed beyond the defining range.")
+alertcondition(ta.change(oConf) != 0 and oConf != 0, "ODR confirmed", "ODR confirmation: price closed beyond the defining range.")
+alertcondition(ta.change(aConf) != 0 and aConf != 0, "ADR confirmed", "ADR confirmation: price closed beyond the defining range.")
+
+gTK    = "Asia · Tokyo session"
+tkOn   = input.bool(true, "Box the session", group = gTK, tooltip = "Styled as a bear candle body — see the HTF candles style group for the colour, transparency and border.")
+tkSess = input.session("1900-0001", "Window", group = gTK, tooltip = "Asia kill zone in exchange (New York) time. Set 0900-1500 with the Asia/Tokyo timezone if you want the Tokyo cash session instead.")
+tkTz   = input.string("America/New_York", "Timezone", group = gTK)
+tkKeep = input.int(5, "Sessions kept on the chart", minval = 1, maxval = 40, group = gTK)
+
+tkIn    = tkOn and not na(time(timeframe.period, tkSess, tkTz))
+tkStart = tkIn and not tkIn[1]
+
+var box        tkBox = na
+var float      tkH   = na
+var float      tkL   = na
+var array<box> tkBxA = array.new<box>()
+
+if tkOn
+    if tkStart
+        tkH := high
+        tkL := low
+        color tkFill = color.new(bearCol, transp)
+        color tkEdge = color.new(bearCol, crisp ? int(transp / 2) : transp)
+        tkBox := box.new(time, high, time + barMs, low, xloc = xloc.bar_time, border_color = showBrd ? tkEdge : color.new(bearCol, 100), border_width = showBrd ? brdW : 0, bgcolor = tkFill)
+        tkBxA.push(tkBox)
+        while tkBxA.size() > tkKeep
+            box.delete(tkBxA.shift())
+    else if tkIn and not na(tkBox)
+        tkH := math.max(tkH, high)
+        tkL := math.min(tkL, low)
+        box.set_top(tkBox, tkH)
+        box.set_bottom(tkBox, tkL)
+        box.set_right(tkBox, time + barMs)
