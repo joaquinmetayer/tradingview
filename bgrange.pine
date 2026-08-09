@@ -1,0 +1,41 @@
+//@version=6
+indicator("Sleep Zone BG", overlay = true)
+
+// =============== SCHEDULE ===============
+sess = input.session("2200-0700", "Sleep range", group = "Schedule")
+days = input.string("1234567", "Active days", group = "Schedule",
+     tooltip = "1=Sun, 2=Mon, 3=Tue, 4=Wed, 5=Thu, 6=Fri, 7=Sat. Example: 23456 = weekdays only")
+tz   = input.string("America/Argentina/Cordoba", "Timezone", group = "Schedule",
+     tooltip = "Example: America/Argentina/Cordoba, GMT-3, UTC. Leave empty to use exchange timezone.")
+
+// =============== COLORS ===============
+mode    = input.string("Outside only", "Fill mode", group = "Colors",
+     options = ["Range only", "Outside only", "Both"])
+colIn   = input.color(color.new(color.blue,   85), "Inside range", group = "Colors")
+colOut  = input.color(color.new(color.orange, 85), "Outside range", group = "Colors")
+
+// =============== DIVIDERS ===============
+showLines = input.bool(false, "Show range boundaries", group = "Dividers")
+lineCol   = input.color(color.new(color.gray, 40), "Line color", group = "Dividers")
+
+// =============== LOGIC ===============
+zone = tz == "" ? syminfo.timezone : tz
+
+// time() returns na when the bar falls outside the session
+inRange = not na(time(timeframe.period, sess + ":" + days, zone))
+
+color fill = color(na)
+if inRange and mode != "Outside only"
+    fill := colIn
+else if not inRange and mode != "Range only"
+    fill := colOut
+
+bgcolor(timeframe.isintraday ? fill : color(na), title = "Session background")
+
+// =============== BOUNDARY LINES ===============
+flip = inRange != inRange[1]
+
+if showLines and flip and timeframe.isintraday
+    line.new(x1 = bar_index, y1 = low, x2 = bar_index, y2 = high,
+         xloc = xloc.bar_index, extend = extend.both, color = lineCol,
+         style = line.style_dotted, width = 1)
